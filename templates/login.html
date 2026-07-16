@@ -1,0 +1,11 @@
+﻿{% extends "base.html" %}
+{% block content %}
+<h2>Login</h2>
+<form method="POST" action="/login">
+    <input type="text" name="username" class="form-control mb-2" placeholder="Username">
+    <input type="password" name="password" class="form-control mb-2" placeholder="Password">
+    <button type="submit" class="btn btn-primary">Login</button>
+</form>
+<p class="mt-2">Test: admin / admin123</p>
+<p>Try SQL injection: admin' OR '1'='1 --</p>
+{% endblock %}

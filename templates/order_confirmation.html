@@ -1,0 +1,14 @@
+﻿{% extends "base.html" %}
+{% block content %}
+<h2>Order Confirmation</h2>
+{% if order %}
+<div class="card">
+    <div class="card-body">
+        <h4>Order #{{ order.order_number }}</h4>
+        <p>Total: ${{ "%.2f"|format(order.total_amount) }}</p>
+        <p>Status: {{ order.delivery_status }}</p>
+        <a href="/orders" class="btn btn-primary">View Orders</a>
+    </div>
+</div>
+{% endif %}
+{% endblock %}

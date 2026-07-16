@@ -1,0 +1,15 @@
+﻿{% extends "base.html" %}
+{% block content %}
+<h2>My Orders</h2>
+<table class="table">
+    <tr><th>Order</th><th>Date</th><th>Total</th><th>Status</th></tr>
+    {% for order in orders %}
+    <tr>
+        <td>{{ order.order_number }}</td>
+        <td>{{ order.order_date[:10] }}</td>
+        <td>${{ "%.2f"|format(order.total_amount) }}</td>
+        <td>{{ order.delivery_status }}</td>
+    </tr>
+    {% endfor %}
+</table>
+{% endblock %}
