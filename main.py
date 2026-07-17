@@ -6,10 +6,9 @@ from fastapi.staticfiles import StaticFiles
 from datetime import datetime
 import json
 import uuid
-import psycopg2
-from psycopg2.extras import RealDictCursor
-from dotenv import load_dotenv
-
+import psycopg
+from psycopg.rows import dict_row  # ← This replaces RealDictCursor
+from dotenv import load_dotenv 
 load_dotenv()
 
 app = FastAPI(title="Vulnerable Shop", debug=True)
