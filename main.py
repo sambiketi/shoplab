@@ -3,37 +3,48 @@ from fastapi import FastAPI, Request, Form, Query, UploadFile, File
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
-from supabase import create_client, Client
 from datetime import datetime
 import json
 import uuid
-import requests
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = FastAPI(title="Vulnerable Shop", debug=True)
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://your-project.supabase.co")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "your-supabase-anon-key-here")
+# Database connection
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+def get_db_connection():
+    return psycopg2.connect(DATABASE_URL)
+
+def execute_query(query: str, params: tuple = None):
+    """Execute a query and return results as a list of dicts"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute(query, params)
+        
+        # Check if this is a SELECT query
+        if query.strip().upper().startswith('SELECT'):
+            result = cur.fetchall()
+        else:
+            conn.commit()
+            result = None
+        
+        cur.close()
+        conn.close()
+        return result
+    except Exception as e:
+        print(f"Database error: {e}")
+        return None
+
 templates = Jinja2Templates(directory="templates")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 sessions = {}
-
-def execute_raw_sql(query: str):
-    try:
-        return supabase.rpc('exec_sql', {'query': query}).execute()
-    except Exception as e:
-        return None
-
-def search_products_vulnerable(search_term: str):
-    query = f"SELECT * FROM products WHERE name LIKE '%{search_term}%' OR description LIKE '%{search_term}%'"
-    return execute_raw_sql(query)
-
-def get_user_by_credentials(username: str, password: str):
-    query = f"SELECT * FROM users WHERE username = '{username}' AND password = '{password}'"
-    result = execute_raw_sql(query)
-    return result.data if result and hasattr(result, 'data') else []
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request, search: str = Query(None), category: str = Query(None)):
@@ -41,23 +52,22 @@ async def home(request: Request, search: str = Query(None), category: str = Quer
     session_data = sessions.get(session_id, {})
     
     if search:
-        products = search_products_vulnerable(search)
-        products_data = products if isinstance(products, list) else []
+        query = "SELECT * FROM products WHERE name ILIKE %s OR description ILIKE %s AND is_active = true"
+        products_data = execute_query(query, (f"%{search}%", f"%{search}%"))
+    elif category:
+        query = "SELECT * FROM products WHERE category = %s AND is_active = true"
+        products_data = execute_query(query, (category,))
     else:
-        if category:
-            query = f"SELECT * FROM products WHERE category = '{category}' AND is_active = true"
-            result = execute_raw_sql(query)
-            products_data = result.data if result and hasattr(result, 'data') else []
-        else:
-            result = supabase.table('products').select('*').eq('is_active', True).execute()
-            products_data = result.data if hasattr(result, 'data') else []
+        query = "SELECT * FROM products WHERE is_active = true"
+        products_data = execute_query(query)
     
-    categories_result = supabase.table('products').select('category').execute()
-    categories = list(set([c.get('category') for c in categories_result.data if c.get('category')]))
+    categories_query = "SELECT DISTINCT category FROM products WHERE category IS NOT NULL"
+    categories_result = execute_query(categories_query)
+    categories = [c['category'] for c in categories_result] if categories_result else []
     
     return templates.TemplateResponse("index.html", {
         "request": request,
-        "products": products_data,
+        "products": products_data or [],
         "categories": categories,
         "search": search or '',
         "category": category or '',
@@ -69,27 +79,27 @@ async def product_detail(request: Request, product_id: int):
     session_id = request.cookies.get('session_id', '')
     session_data = sessions.get(session_id, {})
     
-    product = supabase.table('products').select('*').eq('id', product_id).execute()
-    reviews = supabase.table('reviews').select('*').eq('product_id', product_id).execute()
+    product_query = "SELECT * FROM products WHERE id = %s"
+    product = execute_query(product_query, (product_id,))
+    
+    reviews_query = "SELECT * FROM reviews WHERE product_id = %s"
+    reviews = execute_query(reviews_query, (product_id,))
     
     return templates.TemplateResponse("product.html", {
         "request": request,
-        "product": product.data[0] if product.data else None,
-        "reviews": reviews.data if hasattr(reviews, 'data') else [],
+        "product": product[0] if product else None,
+        "reviews": reviews or [],
         "session": session_data
     })
 
 @app.post("/add_review/{product_id}")
 async def add_review(request: Request, product_id: int, comment: str = Form(...), rating: int = Form(...)):
     user_id = request.cookies.get('user_id', 1)
-    review_data = {
-        "product_id": product_id,
-        "user_id": int(user_id),
-        "rating": rating,
-        "comment": comment,
-        "created_at": datetime.now().isoformat()
-    }
-    supabase.table('reviews').insert(review_data).execute()
+    query = """
+        INSERT INTO reviews (product_id, user_id, rating, comment, created_at) 
+        VALUES (%s, %s, %s, %s, %s)
+    """
+    execute_query(query, (product_id, int(user_id), rating, comment, datetime.now().isoformat()))
     return RedirectResponse(f"/product/{product_id}", status_code=303)
 
 @app.get("/cart", response_class=HTMLResponse)
@@ -99,23 +109,27 @@ async def cart(request: Request):
     session_data = sessions.get(session_id, {})
     
     if user_id:
-        query = f"SELECT * FROM cart WHERE user_id = {user_id}"
-        result = execute_raw_sql(query)
-        cart_items = result.data if result and hasattr(result, 'data') else []
-        for item in cart_items:
-            product = supabase.table('products').select('*').eq('id', item['product_id']).execute()
-            if product.data:
-                item['product'] = product.data[0]
+        query = """
+            SELECT c.*, p.* 
+            FROM cart c 
+            JOIN products p ON c.product_id = p.id 
+            WHERE c.user_id = %s
+        """
+        cart_items = execute_query(query, (int(user_id),))
     else:
-        query = f"SELECT * FROM cart WHERE session_id = '{session_id}'"
-        result = execute_raw_sql(query)
-        cart_items = result.data if result and hasattr(result, 'data') else []
+        query = """
+            SELECT c.*, p.* 
+            FROM cart c 
+            JOIN products p ON c.product_id = p.id 
+            WHERE c.session_id = %s
+        """
+        cart_items = execute_query(query, (session_id,))
     
-    total = sum([item.get('product', {}).get('price', 0) * item.get('quantity', 1) for item in cart_items])
+    total = sum([item.get('price', 0) * item.get('quantity', 1) for item in (cart_items or [])])
     
     return templates.TemplateResponse("cart.html", {
         "request": request,
-        "items": cart_items,
+        "items": cart_items or [],
         "total": total,
         "session": session_data
     })
@@ -129,11 +143,11 @@ async def add_to_cart(request: Request, product_id: int = Form(...), quantity: i
         session_id = str(uuid.uuid4())
     
     if user_id:
-        cart_data = {"user_id": int(user_id), "product_id": product_id, "quantity": quantity, "added_at": datetime.now().isoformat()}
+        query = "INSERT INTO cart (user_id, product_id, quantity, added_at) VALUES (%s, %s, %s, %s)"
+        execute_query(query, (int(user_id), product_id, quantity, datetime.now().isoformat()))
     else:
-        cart_data = {"session_id": session_id, "product_id": product_id, "quantity": quantity, "added_at": datetime.now().isoformat()}
-    
-    supabase.table('cart').insert(cart_data).execute()
+        query = "INSERT INTO cart (session_id, product_id, quantity, added_at) VALUES (%s, %s, %s, %s)"
+        execute_query(query, (session_id, product_id, quantity, datetime.now().isoformat()))
     
     response = RedirectResponse("/cart", status_code=303)
     response.set_cookie("session_id", session_id)
@@ -148,26 +162,24 @@ async def checkout(request: Request):
     if not user_id:
         return RedirectResponse("/login?redirect=/checkout")
     
-    query = f"SELECT * FROM cart WHERE user_id = {user_id}"
-    result = execute_raw_sql(query)
-    cart_items = result.data if result and hasattr(result, 'data') else []
+    query = """
+        SELECT c.*, p.* 
+        FROM cart c 
+        JOIN products p ON c.product_id = p.id 
+        WHERE c.user_id = %s
+    """
+    cart_items = execute_query(query, (int(user_id),))
     
-    for item in cart_items:
-        product = supabase.table('products').select('*').eq('id', item['product_id']).execute()
-        if product.data:
-            item['product'] = product.data[0]
+    user_query = "SELECT * FROM users WHERE id = %s"
+    user = execute_query(user_query, (int(user_id),))
     
-    user_query = f"SELECT * FROM users WHERE id = {user_id}"
-    user_result = execute_raw_sql(user_query)
-    user = user_result.data[0] if user_result and hasattr(user_result, 'data') and user_result.data else None
-    
-    total = sum([item.get('product', {}).get('price', 0) * item.get('quantity', 1) for item in cart_items])
+    total = sum([item.get('price', 0) * item.get('quantity', 1) for item in (cart_items or [])])
     
     return templates.TemplateResponse("checkout.html", {
         "request": request,
-        "items": cart_items,
+        "items": cart_items or [],
         "total": total,
-        "user": user,
+        "user": user[0] if user else None,
         "session": session_data
     })
 
@@ -185,26 +197,20 @@ async def place_order(
     if not user_id:
         return JSONResponse({"error": "Please login first"}, status_code=401)
     
-    cart_query = f"SELECT * FROM cart WHERE user_id = {user_id}"
-    cart_result = execute_raw_sql(cart_query)
-    cart_items = cart_result.data if cart_result and hasattr(cart_result, 'data') else []
+    cart_query = """
+        SELECT c.*, p.* 
+        FROM cart c 
+        JOIN products p ON c.product_id = p.id 
+        WHERE c.user_id = %s
+    """
+    cart_items = execute_query(cart_query, (int(user_id),))
     
     if not cart_items:
         return JSONResponse({"error": "Cart is empty"}, status_code=400)
     
-    total = 0
-    order_items = []
-    for item in cart_items:
-        product = supabase.table('products').select('*').eq('id', item['product_id']).execute()
-        if product.data:
-            price = product.data[0]['price']
-            total += price * item['quantity']
-            order_items.append({
-                'product_id': item['product_id'],
-                'product_name': product.data[0]['name'],
-                'quantity': item['quantity'],
-                'price_at_time': price
-            })
+    total = sum([item['price'] * item['quantity'] for item in cart_items])
+    
+    order_number = f"ORD-{datetime.now().strftime('%Y%m%d')}-{user_id}-{uuid.uuid4().hex[:4].upper()}"
     
     payment_details = {
         'method': payment_method,
@@ -214,51 +220,53 @@ async def place_order(
         'paypal_email': paypal_email
     }
     
-    order_number = f"ORD-{datetime.now().strftime('%Y%m%d')}-{user_id}-{uuid.uuid4().hex[:4].upper()}"
-    
-    order_data = {
-        'order_number': order_number,
-        'user_id': int(user_id),
-        'total_amount': total,
-        'payment_status': 'pending',
-        'payment_method': payment_method,
-        'payment_details': json.dumps(payment_details),
-        'shipping_address': shipping_address,
-        'order_date': datetime.now().isoformat(),
-        'delivery_status': 'processing'
-    }
-    
-    order = supabase.table('orders').insert(order_data).execute()
-    order_id = order.data[0]['id'] if order.data else None
+    order_query = """
+        INSERT INTO orders (order_number, user_id, total_amount, payment_status, payment_method, payment_details, shipping_address, order_date, delivery_status)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+    """
+    order_id = execute_query(order_query, (
+        order_number, int(user_id), total, 'pending', payment_method, 
+        json.dumps(payment_details), shipping_address, datetime.now().isoformat(), 'processing'
+    ))
     
     if order_id:
-        for item in order_items:
-            item_data = {
-                'order_id': order_id,
-                'product_id': item['product_id'],
-                'product_name': item['product_name'],
-                'quantity': item['quantity'],
-                'price_at_time': item['price_at_time'],
-                'total': item['quantity'] * item['price_at_time']
-            }
-            supabase.table('order_items').insert(item_data).execute()
+        order_id_val = order_id[0]['id']
+        for item in cart_items:
+            item_query = """
+                INSERT INTO order_items (order_id, product_id, product_name, quantity, price_at_time, total)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """
+            execute_query(item_query, (
+                order_id_val, item['product_id'], item['name'], 
+                item['quantity'], item['price'], item['price'] * item['quantity']
+            ))
         
-        supabase.table('cart').delete().eq('user_id', int(user_id)).execute()
+        execute_query("DELETE FROM cart WHERE user_id = %s", (int(user_id),))
         
-        for item in order_items:
-            stock_query = f"UPDATE products SET stock_quantity = stock_quantity - {item['quantity']} WHERE id = {item['product_id']}"
-            execute_raw_sql(stock_query)
+        for item in cart_items:
+            stock_query = "UPDATE products SET stock_quantity = stock_quantity - %s WHERE id = %s"
+            execute_query(stock_query, (item['quantity'], item['product_id']))
     
-    return RedirectResponse(f"/order_confirmation/{order_id}", status_code=303)
+    return RedirectResponse(f"/order_confirmation/{order_id_val}", status_code=303)
 
 @app.get("/order_confirmation/{order_id}", response_class=HTMLResponse)
 async def order_confirmation(request: Request, order_id: int):
     session_id = request.cookies.get('session_id', '')
     session_data = sessions.get(session_id, {})
-    order = supabase.table('orders').select('*, order_items(*, products(*))').eq('id', order_id).execute()
+    
+    query = """
+        SELECT o.*, oi.*, p.* 
+        FROM orders o
+        JOIN order_items oi ON o.id = oi.order_id
+        JOIN products p ON oi.product_id = p.id
+        WHERE o.id = %s
+    """
+    order_data = execute_query(query, (order_id,))
+    
     return templates.TemplateResponse("order_confirmation.html", {
         "request": request,
-        "order": order.data[0] if order.data else None,
+        "order": order_data[0] if order_data else None,
         "session": session_data
     })
 
@@ -271,13 +279,12 @@ async def user_orders(request: Request):
     if not user_id:
         return RedirectResponse("/login")
     
-    query = f"SELECT * FROM orders WHERE user_id = {user_id} ORDER BY order_date DESC"
-    result = execute_raw_sql(query)
-    orders_data = result.data if result and hasattr(result, 'data') else []
+    query = "SELECT * FROM orders WHERE user_id = %s ORDER BY order_date DESC"
+    orders_data = execute_query(query, (int(user_id),))
     
     return templates.TemplateResponse("orders.html", {
         "request": request,
-        "orders": orders_data,
+        "orders": orders_data or [],
         "session": session_data
     })
 
@@ -286,17 +293,17 @@ async def admin_panel(request: Request):
     session_id = request.cookies.get('session_id', '')
     session_data = sessions.get(session_id, {})
     
-    products = supabase.table('products').select('*').execute()
-    orders = supabase.table('orders').select('*, users(username)').execute()
-    users = supabase.table('users').select('*').execute()
-    stock = supabase.table('products').select('id,name,stock_quantity,price').execute()
+    products = execute_query("SELECT * FROM products")
+    orders = execute_query("SELECT o.*, u.username FROM orders o JOIN users u ON o.user_id = u.id")
+    users = execute_query("SELECT * FROM users")
+    stock = execute_query("SELECT id, name, stock_quantity, price FROM products")
     
     return templates.TemplateResponse("admin.html", {
         "request": request,
-        "products": products.data if hasattr(products, 'data') else [],
-        "orders": orders.data if hasattr(orders, 'data') else [],
-        "users": users.data if hasattr(users, 'data') else [],
-        "stock": stock.data if hasattr(stock, 'data') else [],
+        "products": products or [],
+        "orders": orders or [],
+        "users": users or [],
+        "stock": stock or [],
         "session": session_data,
         "session_count": len(sessions)
     })
@@ -310,45 +317,42 @@ async def admin_add_product(
     category: str = Form(...),
     stock_quantity: int = Form(...)
 ):
-    product_data = {
-        'name': name,
-        'description': description,
-        'price': price,
-        'category': category,
-        'stock_quantity': stock_quantity,
-        'created_at': datetime.now().isoformat(),
-        'is_active': True
-    }
-    supabase.table('products').insert(product_data).execute()
+    query = """
+        INSERT INTO products (name, description, price, category, stock_quantity, created_at, is_active)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+    """
+    execute_query(query, (name, description, price, category, stock_quantity, datetime.now().isoformat(), True))
     return RedirectResponse("/admin", status_code=303)
 
 @app.delete("/admin/product/{product_id}")
 async def admin_delete_product(product_id: int):
-    query = f"DELETE FROM products WHERE id = {product_id}"
-    execute_raw_sql(query)
+    query = "DELETE FROM products WHERE id = %s"
+    execute_query(query, (product_id,))
     return JSONResponse({"success": True})
 
 @app.post("/admin/order/{order_id}/status")
 async def admin_update_order_status(order_id: int, status: str = Form(...)):
-    query = f"UPDATE orders SET delivery_status = '{status}' WHERE id = {order_id}"
-    execute_raw_sql(query)
+    query = "UPDATE orders SET delivery_status = %s WHERE id = %s"
+    execute_query(query, (status, order_id))
+    
     if status == 'delivered':
-        stock_query = f"""
+        stock_query = """
             UPDATE products 
             SET stock_quantity = stock_quantity - (
-                SELECT quantity FROM order_items WHERE order_id = {order_id}
+                SELECT quantity FROM order_items WHERE order_id = %s
             )
             WHERE id IN (
-                SELECT product_id FROM order_items WHERE order_id = {order_id}
+                SELECT product_id FROM order_items WHERE order_id = %s
             )
         """
-        execute_raw_sql(stock_query)
+        execute_query(stock_query, (order_id, order_id))
+    
     return RedirectResponse("/admin", status_code=303)
 
 @app.post("/admin/stock/add")
 async def admin_add_stock(product_id: int = Form(...), quantity: int = Form(...)):
-    query = f"UPDATE products SET stock_quantity = stock_quantity + {quantity} WHERE id = {product_id}"
-    execute_raw_sql(query)
+    query = "UPDATE products SET stock_quantity = stock_quantity + %s WHERE id = %s"
+    execute_query(query, (quantity, product_id))
     return RedirectResponse("/admin#stock", status_code=303)
 
 @app.get("/login", response_class=HTMLResponse)
@@ -363,7 +367,9 @@ async def login_page(request: Request, redirect: str = Query(None)):
 
 @app.post("/login")
 async def login(request: Request, username: str = Form(...), password: str = Form(...), redirect: str = Form(None)):
-    result = get_user_by_credentials(username, password)
+    query = "SELECT * FROM users WHERE username = %s AND password = %s"
+    result = execute_query(query, (username, password))
+    
     if result:
         user = result[0]
         session_id = str(uuid.uuid4())
@@ -396,16 +402,17 @@ async def logout():
 
 @app.get("/debug")
 async def debug_info(request: Request):
-    users = supabase.table('users').select('id,username,password,email,credit_card_number,credit_card_cvv').execute()
+    users = execute_query("SELECT id, username, password, email FROM users")
     return JSONResponse({
-        "supabase_url": SUPABASE_URL,
+        "database_url": "Set in environment",
         "sessions": sessions,
-        "users": users.data if hasattr(users, 'data') else [],
+        "users": users or [],
         "cookies": dict(request.cookies)
     })
 
 @app.get("/proxy")
 async def proxy(url: str = Query(...)):
+    import requests
     try:
         response = requests.get(url, timeout=5)
         return response.text
@@ -415,6 +422,7 @@ async def proxy(url: str = Query(...)):
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
     file_path = f"static/uploads/{file.filename}"
+    os.makedirs("static/uploads", exist_ok=True)
     content = await file.read()
     with open(file_path, "wb") as f:
         f.write(content)
@@ -422,14 +430,14 @@ async def upload_file(file: UploadFile = File(...)):
 
 @app.get("/api/products")
 async def api_products():
-    products = supabase.table('products').select('*').execute()
-    return products.data if hasattr(products, 'data') else []
+    products = execute_query("SELECT * FROM products")
+    return products or []
 
 @app.get("/api/search")
 async def api_search(q: str = Query(...)):
-    query = f"SELECT * FROM products WHERE name LIKE '%{q}%'"
-    result = execute_raw_sql(query)
-    return result.data if result and hasattr(result, 'data') else []
+    query = "SELECT * FROM products WHERE name ILIKE %s"
+    result = execute_query(query, (f"%{q}%",))
+    return result or []
 
 if __name__ == "__main__":
     import uvicorn
