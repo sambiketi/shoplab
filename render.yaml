@@ -1,0 +1,16 @@
+﻿services:
+  - type: web
+    name: vulnerable-shop
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port \
+    plan: free
+    envVars:
+      - key: SUPABASE_URL
+        value: https://qxwmvjiivihdbezlfxrr.supabase.co
+      - key: SUPABASE_KEY
+        value: sb_publishable_ekjpnoI1BZbs975dK3SXEQ_FAaaHJ6E
+      - key: SECRET_KEY
+        value: supersecretkey123456
+      - key: DEBUG
+        value: False

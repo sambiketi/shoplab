@@ -1,0 +1,94 @@
+﻿{% extends "base.html" %}
+{% block content %}
+<h2>Admin Panel</h2>
+<div class="alert alert-danger">WARNING: No authentication required!</div>
+<div class="row">
+    <div class="col-md-6">
+        <h3>Add Product</h3>
+        <form action="/admin/product" method="POST">
+            <input type="text" name="name" class="form-control mb-2" placeholder="Name">
+            <textarea name="description" class="form-control mb-2" placeholder="Description"></textarea>
+            <input type="number" name="price" class="form-control mb-2" placeholder="Price" step="0.01">
+            <input type="text" name="category" class="form-control mb-2" placeholder="Category">
+            <input type="number" name="stock_quantity" class="form-control mb-2" placeholder="Stock">
+            <button type="submit" class="btn btn-primary">Add Product</button>
+        </form>
+    </div>
+    <div class="col-md-6">
+        <h3>Products</h3>
+        <table class="table table-sm">
+            <tr><th>Name</th><th>Stock</th><th>Action</th></tr>
+            {% for product in products %}
+            <tr>
+                <td>{{ product.name }}</td>
+                <td>{{ product.stock_quantity }}</td>
+                <td>
+                    <button onclick="deleteProduct({{ product.id }})" class="btn btn-danger btn-sm">Delete</button>
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
+</div>
+<h3>Orders</h3>
+<table class="table">
+    <tr><th>Order</th><th>User</th><th>Status</th><th>Action</th></tr>
+    {% for order in orders %}
+    <tr>
+        <td>{{ order.order_number }}</td>
+        <td>{{ order.users.username if order.users else 'Unknown' }}</td>
+        <td>{{ order.delivery_status }}</td>
+        <td>
+            <form action="/admin/order/{{ order.id }}/status" method="POST">
+                <select name="status" class="form-select form-select-sm">
+                    <option value="processing">Processing</option>
+                    <option value="in_transit">In Transit</option>
+                    <option value="delivered">Delivered</option>
+                    <option value="returned">Returned</option>
+                </select>
+                <button type="submit" class="btn btn-primary btn-sm mt-1">Update</button>
+            </form>
+        </td>
+    </tr>
+    {% endfor %}
+</table>
+<h3>Users (VULNERABLE: Exposed passwords!)</h3>
+<table class="table">
+    <tr><th>Username</th><th>Password</th><th>Credit Card</th><th>CVV</th></tr>
+    {% for user in users %}
+    <tr>
+        <td>{{ user.username }}</td>
+        <td class="text-danger">{{ user.password }}</td>
+        <td class="text-danger">{{ user.credit_card_number }}</td>
+        <td class="text-danger">{{ user.credit_card_cvv }}</td>
+    </tr>
+    {% endfor %}
+</table>
+<h3>Stock Management</h3>
+<table class="table">
+    <tr><th>Product</th><th>Stock</th><th>Price</th><th>Add Stock</th></tr>
+    {% for item in stock_summary %}
+    <tr>
+        <td>{{ item.name|safe }}</td>
+        <td>{{ item.stock_quantity }}</td>
+        <td>${{ "%.2f"|format(item.price) }}</td>
+        <td>
+            <form action="/admin/stock/add" method="POST" class="d-inline">
+                <input type="hidden" name="product_id" value="{{ item.id }}">
+                <input type="number" name="quantity" class="form-control form-control-sm" style="width:80px;display:inline-block;" value="10">
+                <button type="submit" class="btn btn-success btn-sm"><i class="fas fa-plus"></i> Add</button>
+            </form>
+        </td>
+    </tr>
+    {% endfor %}
+</table>
+<script>
+function deleteProduct(id) {
+    if(confirm('Delete product?')) {
+        fetch('/admin/product/' + id, {method:'DELETE'}).then(function() {
+            location.reload();
+        });
+    }
+}
+</script>
+{% endblock %}
